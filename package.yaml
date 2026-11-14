@@ -1,0 +1,13 @@
+name: http_server
+version: 0.1.0
+license: MIT
+dependencies:
+  http:
+    git: https://github.com/nylang/http.git
+    rev: 5fbfd2b901aae204df52ee7617602765f2567bef
+  net_core:
+    git: https://github.com/nylang/netcore.git
+    rev: 8b7e6a06bf0cfcc772d952cd5a82f4321981edd2
+directories:
+  interface: [interface]
+  private: [private, tests]
