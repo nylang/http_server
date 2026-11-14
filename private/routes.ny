@@ -23,8 +23,13 @@ pub static method(HttpRoutes) New() -> HttpRoutes {
 }
 
 pub method(HttpRoutes) Add(verb: ref string, path: ref string, id: int32) -> bool {
-  if verb.length == 0 || !path.StartsWith("/") || path.Contains("?") || path.Contains("#") ||
-      self.Lookup(verb, path) != nil {
+  if !path.StartsWith("/") || path.Contains("?") || path.Contains("#") || self.Lookup(verb, path) != nil {
+    return false;
+  }
+
+  // Apply the same token and origin-form validation as the request parser.
+  let fields: <HttpField>[1] = {HttpField{name: "Host", value: "localhost"}};
+  if HttpHead.EncodeRequest(verb, path, fields).IsErr() {
     return false;
   }
 

@@ -17,6 +17,9 @@ This caller-driven HTTP/1.1 profile serves one exchange per connection.
 Each exchange uses one absolute deadline and cancellation token. Unsupported
 or malformed opening requests and terminal I/O errors close the connection.
 An application can send a final error response after admitting the head.
+For a request with `Expect: 100-continue`, the first body read sends the
+interim response. Send a final rejection before reading to skip the interim
+response. Route registration validates method and path wire syntax.
 Applications may run multiple listeners or hand accepted connections to
 their own worker model. TLS can terminate at a reverse proxy.
 

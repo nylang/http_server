@@ -40,7 +40,10 @@ method(HttpServerState) ReadHead() -> Result<Unit, HttpServerError> {
   while i < head.FieldCount() {
     let field = head.FieldAt(i).get_if<HttpField>() as HttpField;
     if field.name.EqualAsciiIgnoreCase("Expect") {
-      return HttpServerError{kind: HttpServerErrorKind.Unsupported};
+      if self.expect_continue || !field.value.EqualAsciiIgnoreCase("100-continue") {
+        return HttpServerError{kind: HttpServerErrorKind.Unsupported};
+      }
+      self.expect_continue = true;
     }
     i += 1;
   }
@@ -52,6 +55,7 @@ method(HttpServerState) ReadHead() -> Result<Unit, HttpServerError> {
 
   self.head = head;
   self.decoder = move(body.get_if<HttpBodyDecoder>() as HttpBodyDecoder);
+  self.expect_continue = self.expect_continue && !self.decoder.IsComplete();
   return UnitValue();
 }
 
@@ -101,6 +105,14 @@ method(HttpServerState) ReadBodyChunk(output: ref NetMutableBytes) -> Result<int
   let control = self.Control();
   if control.IsErr() {
     return control.get_if<HttpServerError>() as HttpServerError;
+  }
+
+  if self.expect_continue {
+    let response = self.Send(NetBytes.FromString("HTTP/1.1 100 Continue\r\n\r\n"));
+    if response.IsErr() {
+      return response.get_if<HttpServerError>() as HttpServerError;
+    }
+    self.expect_continue = false;
   }
 
   while !self.decoder.IsComplete() {

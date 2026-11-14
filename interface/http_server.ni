@@ -61,7 +61,7 @@ pub static method(HttpServerExchange) Accept(
 ) -> Result<HttpServerExchange, HttpServerError>;
 
 /** @brief Adopt an accepted TCP connection and read its HTTP/1.1 head.
- * @note Consumption applies on failure as well. Requests with Expect are unsupported.
+ * @note Consumption applies on failure as well. The sole supported expectation is 100-continue.
  * The supplied controls apply until the connection closes or upgrades. */
 pub static method(HttpServerExchange) Read(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
@@ -72,7 +72,8 @@ pub method(HttpServerExchange) Request() -> HttpHead;
 
 /** @brief Read decoded request bytes into the caller's buffer.
  * @returns Positive payload count, zero at the exact body boundary or a terminal error.
- * @note The caller must supply a nonempty buffer. Earlier payload is partial until zero. */
+ * @note The caller must supply a nonempty buffer. The first read sends 100 Continue when
+ * requested and a body is expected. Earlier payload is partial until zero. */
 pub method(HttpServerExchange) ReadBody(output: ref NetMutableBytes) -> Result<intptr, HttpServerError>;
 
 /** @brief Start one final HTTP response. The library adds Connection: close.

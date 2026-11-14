@@ -18,6 +18,7 @@ struct HttpServerState {
   decoder: HttpBodyDecoder;
   writer: HttpBodyWriter;
   responding: bool;
+  expect_continue: bool;
   prefix: NetBuffer;
   offset: intptr;
 }
