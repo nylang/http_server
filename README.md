@@ -19,7 +19,20 @@ head. To send trailers, declare their names in the response's `Trailer`
 header and finish the chunked response with `FinishResponseWithTrailers`.
 The shared HTTP framing rules validate inbound and outbound trailer fields.
 
-This caller-driven HTTP/1.1 profile serves one exchange per connection.
+The original caller-driven `Accept` and `Read` entry points serve one exchange
+per connection. To reuse connections, adopt TCP with `ReadPersistent`, finish
+the response, and call `NextRequest` with fresh controls. Reuse requires a
+fully consumed request and a self-delimited response. Call `CloseAfterResponse`
+before starting the response to retire the connection explicitly.
+
+`HttpServer.Serve` runs a serial accept and dispatch loop with a wakeable
+cancellation token. Shutdown interrupts idle accept or request-head reads.
+An already admitted handler can finish under its original deadline. The
+loop retires a connection on protocol, transport or unexpected EOF errors.
+Other handler errors end the loop. The
+caller owns the listener and can use the lower-level exchange API for a
+concurrent worker model.
+
 Each exchange uses one absolute deadline and cancellation token. Unsupported
 or malformed opening requests and terminal I/O errors close the connection.
 An application can send a final error response after admitting the head.

@@ -43,7 +43,7 @@ pub method(HttpRoutes) Add(verb: ref string, path: ref string, id: int32) -> boo
 /** @brief Find the route for a parsed request. The query string does not participate. */
 pub method(HttpRoutes) Match(request: ref HttpHead) -> int32?;
 
-/** @brief Owns a TCP connection for one HTTP/1.1 exchange on the caller thread. */
+/** @brief Owns a TCP connection and one active HTTP/1.1 exchange on the caller thread. */
 pub struct HttpServerExchange;
 
 /** @brief The connection has one owner. */
@@ -67,6 +67,19 @@ pub static method(HttpServerExchange) Read(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
 ) -> Result<HttpServerExchange, HttpServerError>;
 
+/** @brief Adopt TCP and opt into sequential HTTP/1.1 keep-alive. */
+pub static method(HttpServerExchange) ReadPersistent(
+  connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
+) -> Result<HttpServerExchange, HttpServerError>;
+
+/** @brief Read the next request after finishing the previous response.
+ * @returns False on a retired connection or EOF between requests. An incomplete head is an error.
+ * @note The supplied controls apply to the new request and its response. */
+pub method(HttpServerExchange) NextRequest(options: ref NetOperationOptions) -> Result<bool, HttpServerError>;
+
+/** @brief Require connection closure after this response. Call before StartResponse. */
+pub method(HttpServerExchange) CloseAfterResponse() -> Result<Unit, HttpServerError>;
+
 /** @brief Return the parsed request. A default exchange returns an invalid head. */
 pub method(HttpServerExchange) Request() -> HttpHead;
 
@@ -82,7 +95,7 @@ pub method(HttpServerExchange) RequestTrailerCount() -> Result<int32, HttpServer
 /** @brief Return an owned request trailer by zero-based wire order after body completion. */
 pub method(HttpServerExchange) RequestTrailerAt(index: int32) -> Result<HttpField, HttpServerError>;
 
-/** @brief Start one final HTTP response. The library adds Connection: close.
+/** @brief Start one final HTTP response. The library adds Connection: close when retiring the connection.
  * @note Provide Content-Length for fixed responses or Transfer-Encoding: chunked
  * for streamed responses. HEAD and bodyless statuses honor shared HTTP framing.
  * Declare any chunked response trailers in the Trailer header.
@@ -94,10 +107,10 @@ pub method(HttpServerExchange) StartResponse(
 /** @brief Write all supplied response payload bytes, stopping on terminal failure. */
 pub method(HttpServerExchange) WriteBody(input: ref NetBytes) -> Result<Unit, HttpServerError>;
 
-/** @brief Finish response framing and close the connection. */
+/** @brief Finish response framing; eligible persistent connections can receive another request. */
 pub method(HttpServerExchange) FinishResponse() -> Result<Unit, HttpServerError>;
 
-/** @brief Finish a chunked response with declared, validated trailers and close the connection.
+/** @brief Finish a chunked response with declared, validated trailers.
  * @note An invalid or undeclared trailer closes the exchange with a protocol error. */
 pub method(HttpServerExchange) FinishResponseWithTrailers(trailers: ref <HttpField>[]) -> Result<Unit, HttpServerError>;
 
@@ -107,3 +120,22 @@ pub method(HttpServerExchange) Upgrade(limits: ref WebSocketLimits) -> Result<We
 
 /** @brief Immediately close a remaining connection. */
 pub method(HttpServerExchange) Close() -> void;
+
+/** @brief Synchronous handler for one admitted request.
+ * @note Finish the response or hand off the connection before returning success. */
+pub interface HttpServerHandler {
+  Handle(exchange: ref mut HttpServerExchange) -> Result<Unit, HttpServerError>;
+}
+
+/** @brief Serial HTTP/1.1 service loop over the caller's listening socket. */
+pub struct HttpServer;
+
+/** @brief Accept and serve connections until stop is cancelled.
+ * @note A wakeable stop token interrupts idle accepts or request-head reads.
+ * An active handler may finish under its own per-exchange deadline. Transport
+ * errors, malformed input and unexpected EOF retire the affected connection.
+ * Other handler errors stop the loop. The caller retains the listening socket. */
+pub static method(HttpServer) Serve(
+  listener: ref mut TcpListener, handler: ref mut HttpServerHandler,
+  limits: ref HttpServerLimits, stop: ref NetCancellation, timeout_ns: uint64
+) -> Result<Unit, HttpServerError>;

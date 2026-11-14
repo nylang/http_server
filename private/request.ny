@@ -3,27 +3,40 @@
 
 part of HttpServerConnection;
 
-method(HttpServerState) ReadHead() -> Result<Unit, HttpServerError> {
+method(HttpServerState) ReadHead() -> Result<bool, HttpServerError> {
+  let control = self.Control();
+  if control.IsErr() {
+    return control.get_if<HttpServerError>() as HttpServerError;
+  }
+
   var made = HttpHeadParser.NewRequest(self.limits.head);
   if made.IsErr() {
     return HttpServerError{kind: HttpServerErrorKind.Protocol, http: made.get_if<HttpError>()};
   }
 
   var parser = move(made.get_if<HttpHeadParser>() as HttpHeadParser);
+  var started = false;
   while !parser.IsComplete() {
-    let received = self.FillPrefix();
-    if received.IsErr() {
-      return received.get_if<HttpServerError>() as HttpServerError;
-    }
-    if (received.get_if<intptr>() as intptr) == 0ip {
-      return HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
+    if self.offset == self.prefix.Len() {
+      let received = self.FillPrefix();
+      if received.IsErr() {
+        return received.get_if<HttpServerError>() as HttpServerError;
+      }
+      if (received.get_if<intptr>() as intptr) == 0ip {
+        if started {
+          return HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
+        }
+        return false;
+      }
     }
 
-    let parsed = parser.Push(self.prefix.Bytes());
+    let input = self.prefix.Bytes().Slice(self.offset, self.prefix.Len() - self.offset).get_if<NetBytes>() as NetBytes;
+    let parsed = parser.Push(input);
     if parsed.IsErr() {
       return HttpServerError{kind: HttpServerErrorKind.Protocol, http: parsed.get_if<HttpError>()};
     }
-    self.offset = parsed.get_if<intptr>() as intptr;
+    self.offset += parsed.get_if<intptr>() as intptr;
+    started = true;
   }
 
   let parsed = parser.Head();
@@ -56,7 +69,7 @@ method(HttpServerState) ReadHead() -> Result<Unit, HttpServerError> {
   self.head = head;
   self.decoder = move(body.get_if<HttpBodyDecoder>() as HttpBodyDecoder);
   self.expect_continue = self.expect_continue && !self.decoder.IsComplete();
-  return UnitValue();
+  return true;
 }
 
 method(HttpServerState) FillPrefix() -> Result<intptr, HttpServerError> {

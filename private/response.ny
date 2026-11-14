@@ -39,17 +39,29 @@ method(HttpServerState) PrepareResponse(
     return HttpServerError{kind: HttpServerErrorKind.InvalidArgument};
   }
 
-  var outgoing = new <HttpField>[fields.length + 1];
+  let plan = self.head.BodyPlan().get_if<HttpBodyPlan>() as HttpBodyPlan;
+  var framed = self.head.Method() == "HEAD" || status == 204 || status == 304;
   var i: int32 = 0;
   while i < fields.length {
     let field = fields[i];
     if field.name.EqualAsciiIgnoreCase("Connection") || field.name.EqualAsciiIgnoreCase("Upgrade") {
       return HttpServerError{kind: HttpServerErrorKind.InvalidArgument};
     }
-    outgoing[i] = field;
+    framed = framed || field.name.EqualAsciiIgnoreCase("Content-Length") ||
+      field.name.EqualAsciiIgnoreCase("Transfer-Encoding");
     i += 1;
   }
-  outgoing[i] = HttpField{name: "Connection", value: "close"};
+  let can_reuse = framed && self.persistent && !self.close_after_response &&
+    !plan.close_connection && self.decoder.IsComplete();
+  var outgoing = new <HttpField>[fields.length + (can_reuse ? 0 : 1)];
+  i = 0;
+  while i < fields.length {
+    outgoing[i] = fields[i];
+    i += 1;
+  }
+  if !can_reuse {
+    outgoing[i] = HttpField{name: "Connection", value: "close"};
+  }
 
   let method_name = self.head.Method();
   let response = HttpHead.EncodeResponse(status, reason, outgoing, method_name);
@@ -74,12 +86,15 @@ method(HttpServerState) PrepareResponse(
     return HttpServerError{kind: HttpServerErrorKind.Protocol, http: parsed.get_if<HttpError>()};
   }
 
-  var writer = HttpBodyWriter.New(parsed.get_if<HttpHead>() as HttpHead, self.limits.response_body);
+  let response_head = parsed.get_if<HttpHead>() as HttpHead;
+  let response_plan = response_head.BodyPlan().get_if<HttpBodyPlan>() as HttpBodyPlan;
+  var writer = HttpBodyWriter.New(response_head, self.limits.response_body);
   if writer.IsErr() {
     return HttpServerError{kind: HttpServerErrorKind.Protocol, http: writer.get_if<HttpError>()};
   }
 
   self.writer = move(writer.get_if<HttpBodyWriter>() as HttpBodyWriter);
+  self.close_after_response = !can_reuse || response_plan.close_connection || response_plan.kind == HttpBodyKind.UntilEof;
   return wire;
 }
 
@@ -90,7 +105,7 @@ pub method(HttpServerExchange) WriteBody(input: ref NetBytes) -> Result<Unit, Ht
   }
 
   var state = cell as arc<HttpServerState>;
-  if !state.responding {
+  if !state.responding || state.response_finished {
     return HttpServerError{kind: HttpServerErrorKind.InvalidState};
   }
 
@@ -116,7 +131,7 @@ pub method(HttpServerExchange) FinishResponseWithTrailers(
   }
 
   var state = cell as arc<HttpServerState>;
-  if !state.responding {
+  if !state.responding || state.response_finished {
     return HttpServerError{kind: HttpServerErrorKind.InvalidState};
   }
 
@@ -127,7 +142,11 @@ pub method(HttpServerExchange) FinishResponseWithTrailers(
   }
 
   let written = state.StreamBody(NetBytes{}, true);
-  self.Close();
+  if state.close_after_response || written.IsErr() {
+    self.Close();
+  } else {
+    state.response_finished = true;
+  }
   return written;
 }
 

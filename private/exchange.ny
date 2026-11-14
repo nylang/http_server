@@ -5,6 +5,7 @@
 module HttpServerConnection;
 part "request.ny";
 part "response.ny";
+part "serve.ny";
 import "stdlib:stdlib.ny";
 import "http:http.ny";
 import "net_core:net_core.ny";
@@ -18,6 +19,9 @@ struct HttpServerState {
   decoder: HttpBodyDecoder;
   writer: HttpBodyWriter;
   responding: bool;
+  response_finished: bool;
+  persistent: bool;
+  close_after_response: bool;
   expect_continue: bool;
   prefix: NetBuffer;
   offset: intptr;
@@ -72,14 +76,65 @@ pub static method(HttpServerExchange) Accept(
 pub static method(HttpServerExchange) Read(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
 ) -> Result<HttpServerExchange, HttpServerError> {
-  var state = new arc<HttpServerState>{connection: move(connection), options: options, limits: limits};
+  return HttpServerExchange.ReadConnection(connection, limits, options, false);
+}
+
+pub static method(HttpServerExchange) ReadPersistent(
+  connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
+) -> Result<HttpServerExchange, HttpServerError> {
+  return HttpServerExchange.ReadConnection(connection, limits, options, true);
+}
+
+static method(HttpServerExchange) ReadConnection(
+  connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions, persistent: bool
+) -> Result<HttpServerExchange, HttpServerError> {
+  var state = new arc<HttpServerState>{
+    connection: move(connection), options: options, limits: limits, persistent: persistent
+  };
   let received = state.ReadHead();
-  if received.IsErr() {
+  if received.IsErr() || !(received.get_if<bool>() as bool) {
     state.connection.Close();
-    return received.get_if<HttpServerError>() as HttpServerError;
+    return received.IsErr() ? (received.get_if<HttpServerError>() as HttpServerError) :
+      HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
   }
 
   return HttpServerExchange{cell: state};
+}
+
+pub method(HttpServerExchange) NextRequest(options: ref NetOperationOptions) -> Result<bool, HttpServerError> {
+  let cell = self.cell;
+  if cell == nil {
+    return false;
+  }
+
+  var state = cell as arc<HttpServerState>;
+  if !state.response_finished {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidState};
+  }
+
+  state.options = options;
+  state.responding = false;
+  state.response_finished = false;
+  state.close_after_response = false;
+  state.expect_continue = false;
+  let result = state.ReadHead();
+  if result.IsErr() || !(result.get_if<bool>() as bool) {
+    self.Close();
+  }
+
+  return result;
+}
+
+pub method(HttpServerExchange) CloseAfterResponse() -> Result<Unit, HttpServerError> {
+  let cell = self.cell;
+  if cell == nil || (cell as arc<HttpServerState>).responding {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidState};
+  }
+
+  var state = cell as arc<HttpServerState>;
+  state.close_after_response = true;
+
+  return UnitValue();
 }
 
 method(HttpServerState) Control() -> Result<Unit, HttpServerError> {
