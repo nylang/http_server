@@ -12,7 +12,7 @@ import "net_core:net_core.ny";
 import "interface/http_server.ni";
 
 struct HttpServerState {
-  connection: TcpConnection;
+  transport: WebSocketTransport;
   options: NetOperationOptions;
   limits: HttpServerLimits;
   head: HttpHead;
@@ -48,7 +48,7 @@ pub method(HttpServerExchange) Close() -> void {
   self.cell = nil;
   if cell != nil {
     var state = cell as arc<HttpServerState>;
-    state.connection.Close();
+    state.transport.Abort();
   }
 }
 
@@ -76,24 +76,24 @@ pub static method(HttpServerExchange) Accept(
 pub static method(HttpServerExchange) Read(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
 ) -> Result<HttpServerExchange, HttpServerError> {
-  return HttpServerExchange.ReadConnection(connection, limits, options, false);
+  return HttpServerExchange.ReadTransport(HttpServerTcp{connection: move(connection)}, limits, options, false);
 }
 
 pub static method(HttpServerExchange) ReadPersistent(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
 ) -> Result<HttpServerExchange, HttpServerError> {
-  return HttpServerExchange.ReadConnection(connection, limits, options, true);
+  return HttpServerExchange.ReadTransport(HttpServerTcp{connection: move(connection)}, limits, options, true);
 }
 
-static method(HttpServerExchange) ReadConnection(
-  connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions, persistent: bool
+pub static method(HttpServerExchange) ReadTransport(
+  transport: WebSocketTransport, limits: ref HttpServerLimits, options: ref NetOperationOptions, persistent: bool
 ) -> Result<HttpServerExchange, HttpServerError> {
   var state = new arc<HttpServerState>{
-    connection: move(connection), options: options, limits: limits, persistent: persistent
+    transport: transport, options: options, limits: limits, persistent: persistent
   };
   let received = state.ReadHead();
   if received.IsErr() || !(received.get_if<bool>() as bool) {
-    state.connection.Close();
+    state.transport.Abort();
     return received.IsErr() ? (received.get_if<HttpServerError>() as HttpServerError) :
       HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
   }
@@ -147,20 +147,62 @@ method(HttpServerState) Control() -> Result<Unit, HttpServerError> {
 }
 
 method(HttpServerState) Send(bytes: ref NetBytes) -> Result<Unit, HttpServerError> {
+  if bytes.Len() == 0ip {
+    return UnitValue();
+  }
+
+  let sent = self.transport.WriteAll(bytes, self.options);
+  if sent.IsErr() {
+    return HttpServerError.FromTransport(sent.get_if<WebSocketError>() as WebSocketError);
+  }
+
+  return UnitValue();
+}
+
+static method(HttpServerError) FromTransport(error: ref WebSocketError) -> HttpServerError {
+  if error.kind == WebSocketErrorKind.UnexpectedEof {
+    return HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
+  }
+
+  return HttpServerError{kind: HttpServerErrorKind.Transport, socket: error.network_error, websocket: error};
+}
+
+// The installed transport owns transport I/O and can transfer directly to WebSocket.
+struct HttpServerTcp implements WebSocketTransport {
+  connection: TcpConnection;
+}
+
+@override
+method(HttpServerTcp) Read(buffer: ref NetMutableBytes, options: ref NetOperationOptions) -> Result<intptr, WebSocketError> {
+  let read = self.connection.Read(buffer, options);
+  if read.IsErr() {
+    return WebSocketError{kind: WebSocketErrorKind.Transport, network_error: read.get_if<NetError>()};
+  }
+
+  return read.get_if<intptr>() as intptr;
+}
+
+@override
+method(HttpServerTcp) WriteAll(buffer: ref NetBytes, options: ref NetOperationOptions) -> Result<Unit, WebSocketError> {
   var offset: intptr = 0;
-  while offset < bytes.Len() {
-    let rest = bytes.Slice(offset, bytes.Len() - offset).get_if<NetBytes>() as NetBytes;
-    let sent = self.connection.Write(rest, self.options);
+  while offset < buffer.Len() {
+    let rest = buffer.Slice(offset, buffer.Len() - offset).get_if<NetBytes>() as NetBytes;
+    let sent = self.connection.Write(rest, options);
     if sent.IsErr() {
-      return HttpServerError{kind: HttpServerErrorKind.Transport, socket: sent.get_if<NetError>()};
+      return WebSocketError{kind: WebSocketErrorKind.Transport, network_error: sent.get_if<NetError>()};
     }
 
     let count = sent.get_if<intptr>() as intptr;
     if count <= 0ip {
-      return HttpServerError{kind: HttpServerErrorKind.UnexpectedEof};
+      return WebSocketError{kind: WebSocketErrorKind.UnexpectedEof};
     }
     offset += count;
   }
 
   return UnitValue();
+}
+
+@override
+method(HttpServerTcp) Abort() -> void {
+  self.connection.Close();
 }

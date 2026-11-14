@@ -33,6 +33,13 @@ Other handler errors end the loop. The
 caller owns the listener and can use the lower-level exchange API for a
 concurrent worker model.
 
+Use `ReadTransport` to adopt an exclusively owned byte transport after
+its handshake, such as an application-provided TLS transport negotiated
+for HTTP/1.1. It uses the same transport contract as WebSocket, so an
+approved upgrade can hand off that transport together with read-ahead.
+The application supplies the server certificate, handshake and ALPN
+policy for a TLS transport.
+
 Each exchange uses one absolute deadline and cancellation token. Unsupported
 or malformed opening requests and terminal I/O errors close the connection.
 An application can send a final error response after admitting the head.
@@ -43,5 +50,5 @@ Applications may run multiple listeners or hand accepted connections to
 their own worker model. TLS can terminate at a reverse proxy.
 
 After authorizing a request and validating its route and Origin, call
-`Upgrade` to transfer TCP ownership and preserve any WebSocket bytes read
+`Upgrade` to transfer transport ownership and preserve any WebSocket bytes read
 with the HTTP head.

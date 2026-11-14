@@ -43,7 +43,7 @@ pub method(HttpRoutes) Add(verb: ref string, path: ref string, id: int32) -> boo
 /** @brief Find the route for a parsed request. The query string does not participate. */
 pub method(HttpRoutes) Match(request: ref HttpHead) -> int32?;
 
-/** @brief Owns a TCP connection and one active HTTP/1.1 exchange on the caller thread. */
+/** @brief Owns an ordered connection and one active HTTP/1.1 exchange on the caller thread. */
 pub struct HttpServerExchange;
 
 /** @brief The connection has one owner. */
@@ -70,6 +70,15 @@ pub static method(HttpServerExchange) Read(
 /** @brief Adopt TCP and opt into sequential HTTP/1.1 keep-alive. */
 pub static method(HttpServerExchange) ReadPersistent(
   connection: ref mut TcpConnection, limits: ref HttpServerLimits, options: ref NetOperationOptions
+) -> Result<HttpServerExchange, HttpServerError>;
+
+/** @brief Adopt an already established ordered byte transport for HTTP/1.1.
+ * @note Pass an exclusively owned transport. For TLS, finish the handshake and
+ * select HTTP/1.1 before calling. The exchange consumes the transport on failure
+ * as well as success and can hand it off to WebSocket. */
+pub static method(HttpServerExchange) ReadTransport(
+  transport: WebSocketTransport, limits: ref HttpServerLimits,
+  options: ref NetOperationOptions, persistent: bool
 ) -> Result<HttpServerExchange, HttpServerError>;
 
 /** @brief Read the next request after finishing the previous response.
@@ -114,7 +123,7 @@ pub method(HttpServerExchange) FinishResponse() -> Result<Unit, HttpServerError>
  * @note An invalid or undeclared trailer closes the exchange with a protocol error. */
 pub method(HttpServerExchange) FinishResponseWithTrailers(trailers: ref <HttpField>[]) -> Result<Unit, HttpServerError>;
 
-/** @brief Upgrade an application-approved request, preserving HTTP read-ahead.
+/** @brief Transfer the connection to an approved WebSocket upgrade, preserving HTTP read-ahead.
  * @note Perform route, Origin and authorization checks before calling. */
 pub method(HttpServerExchange) Upgrade(limits: ref WebSocketLimits) -> Result<WebSocket, HttpServerError>;
 

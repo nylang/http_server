@@ -75,12 +75,15 @@ method(HttpServerState) ReadHead() -> Result<bool, HttpServerError> {
 method(HttpServerState) FillPrefix() -> Result<intptr, HttpServerError> {
   var scratch: <uint8>[8192] = <uint8>[8192]{};
   let buffer = NetMutableBytes.FromRaw(&mut scratch[0], 8192ip).get_if<NetMutableBytes>() as NetMutableBytes;
-  let received = self.connection.Read(buffer, self.options);
+  let received = self.transport.Read(buffer, self.options);
   if received.IsErr() {
-    return HttpServerError{kind: HttpServerErrorKind.Transport, socket: received.get_if<NetError>()};
+    return HttpServerError.FromTransport(received.get_if<WebSocketError>() as WebSocketError);
   }
 
   let count = received.get_if<intptr>() as intptr;
+  if count < 0ip || count > buffer.Len() {
+    return HttpServerError{kind: HttpServerErrorKind.Transport};
+  }
   let bytes = buffer.AsReadOnly().Slice(0ip, count).get_if<NetBytes>() as NetBytes;
   let held = NetBuffer.CopyFrom(bytes);
   if held.IsErr() {
@@ -200,7 +203,7 @@ pub method(HttpServerExchange) Upgrade(limits: ref WebSocketLimits) -> Result<We
   }
 
   let prefix = state.prefix.Slice(state.offset, state.prefix.Len() - state.offset).get_if<NetBuffer>() as NetBuffer;
-  var opened = WebSocket.AcceptTcp(state.connection, state.head, prefix, limits, state.options);
+  var opened = WebSocket.Accept(move(state.transport), state.head, prefix, limits, state.options);
   self.cell = nil;
   if opened.IsErr() {
     return HttpServerError{kind: HttpServerErrorKind.Upgrade, websocket: opened.get_if<WebSocketError>()};
