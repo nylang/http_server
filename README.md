@@ -13,6 +13,12 @@ zero. Supply `Content-Length` or `Transfer-Encoding: chunked` to
 `StartResponse` and stream bytes using `WriteBody`. `FinishResponse`
 completes framing and closes the connection.
 
+Read trailers with `RequestTrailerCount` and `RequestTrailerAt` after
+the request body is complete. Each trailer is separate from the request
+head. To send trailers, declare their names in the response's `Trailer`
+header and finish the chunked response with `FinishResponseWithTrailers`.
+The shared HTTP framing rules validate inbound and outbound trailer fields.
+
 This caller-driven HTTP/1.1 profile serves one exchange per connection.
 Each exchange uses one absolute deadline and cancellation token. Unsupported
 or malformed opening requests and terminal I/O errors close the connection.

@@ -43,8 +43,7 @@ method(HttpServerState) PrepareResponse(
   var i: int32 = 0;
   while i < fields.length {
     let field = fields[i];
-    if field.name.EqualAsciiIgnoreCase("Connection") || field.name.EqualAsciiIgnoreCase("Upgrade") ||
-        field.name.EqualAsciiIgnoreCase("Trailer") {
+    if field.name.EqualAsciiIgnoreCase("Connection") || field.name.EqualAsciiIgnoreCase("Upgrade") {
       return HttpServerError{kind: HttpServerErrorKind.InvalidArgument};
     }
     outgoing[i] = field;
@@ -104,6 +103,13 @@ pub method(HttpServerExchange) WriteBody(input: ref NetBytes) -> Result<Unit, Ht
 }
 
 pub method(HttpServerExchange) FinishResponse() -> Result<Unit, HttpServerError> {
+  let trailers: <HttpField>[0] = <HttpField>[0]{};
+  return self.FinishResponseWithTrailers(trailers);
+}
+
+pub method(HttpServerExchange) FinishResponseWithTrailers(
+  trailers: ref <HttpField>[]
+) -> Result<Unit, HttpServerError> {
   let cell = self.cell;
   if cell == nil {
     return HttpServerError{kind: HttpServerErrorKind.InvalidState};
@@ -114,7 +120,6 @@ pub method(HttpServerExchange) FinishResponse() -> Result<Unit, HttpServerError>
     return HttpServerError{kind: HttpServerErrorKind.InvalidState};
   }
 
-  let trailers: <HttpField>[0] = <HttpField>[0]{};
   let finished = state.writer.Finish(trailers);
   if finished.IsErr() {
     self.Close();

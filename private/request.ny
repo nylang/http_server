@@ -147,6 +147,34 @@ method(HttpServerState) ReadBodyChunk(output: ref NetMutableBytes) -> Result<int
   return 0ip;
 }
 
+pub method(HttpServerExchange) RequestTrailerCount() -> Result<int32, HttpServerError> {
+  let cell = self.cell;
+  if cell == nil {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidState};
+  }
+
+  let result = (cell as arc<HttpServerState>).decoder.TrailerCount();
+  if result.IsErr() {
+    return HttpServerError{kind: HttpServerErrorKind.Protocol, http: result.get_if<HttpError>()};
+  }
+
+  return result.get_if<int32>() as int32;
+}
+
+pub method(HttpServerExchange) RequestTrailerAt(index: int32) -> Result<HttpField, HttpServerError> {
+  let cell = self.cell;
+  if cell == nil {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidState};
+  }
+
+  let result = (cell as arc<HttpServerState>).decoder.TrailerAt(index);
+  if result.IsErr() {
+    return HttpServerError{kind: HttpServerErrorKind.Protocol, http: result.get_if<HttpError>()};
+  }
+
+  return result.get_if<HttpField>() as HttpField;
+}
+
 pub method(HttpServerExchange) Upgrade(limits: ref WebSocketLimits) -> Result<WebSocket, HttpServerError> {
   let cell = self.cell;
   if cell == nil {

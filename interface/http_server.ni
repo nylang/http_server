@@ -76,9 +76,16 @@ pub method(HttpServerExchange) Request() -> HttpHead;
  * requested and a body is expected. Earlier payload is partial until zero. */
 pub method(HttpServerExchange) ReadBody(output: ref NetMutableBytes) -> Result<intptr, HttpServerError>;
 
+/** @brief Return the number of request trailers after the body is complete. */
+pub method(HttpServerExchange) RequestTrailerCount() -> Result<int32, HttpServerError>;
+
+/** @brief Return an owned request trailer by zero-based wire order after body completion. */
+pub method(HttpServerExchange) RequestTrailerAt(index: int32) -> Result<HttpField, HttpServerError>;
+
 /** @brief Start one final HTTP response. The library adds Connection: close.
  * @note Provide Content-Length for fixed responses or Transfer-Encoding: chunked
  * for streamed responses. HEAD and bodyless statuses honor shared HTTP framing.
+ * Declare any chunked response trailers in the Trailer header.
  * The caller may start an error response without draining the request. */
 pub method(HttpServerExchange) StartResponse(
   status: int32, reason: ref string, fields: ref <HttpField>[]
@@ -89,6 +96,10 @@ pub method(HttpServerExchange) WriteBody(input: ref NetBytes) -> Result<Unit, Ht
 
 /** @brief Finish response framing and close the connection. */
 pub method(HttpServerExchange) FinishResponse() -> Result<Unit, HttpServerError>;
+
+/** @brief Finish a chunked response with declared, validated trailers and close the connection.
+ * @note An invalid or undeclared trailer closes the exchange with a protocol error. */
+pub method(HttpServerExchange) FinishResponseWithTrailers(trailers: ref <HttpField>[]) -> Result<Unit, HttpServerError>;
 
 /** @brief Upgrade an application-approved request, preserving HTTP read-ahead.
  * @note Perform route, Origin and authorization checks before calling. */
