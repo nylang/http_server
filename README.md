@@ -92,6 +92,15 @@ Callbacks from different streams can interleave on the same connection
 thread. Keep callbacks short and release per-stream state in `OnClose`.
 The same body budget applies to streaming transfers.
 
+`ServeDuplexTcp` and `ServeDuplexTransport` accept an
+`Http2DuplexHandler`. Return the final response from any inbound callback
+through `Http2DuplexAction`. Once its headers are sent, the request can
+continue to deliver DATA and trailers while the peer reads the response.
+The producer returns `Http2DuplexChunk{written: 0, end: false}` to await
+another inbound DATA frame or request end. Use `end: true` with the final
+chunk, including an empty chunk. The duplex bridge entry point is
+`nyra_http2_server_duplex_provider`.
+
 Build the optional server bridge with nghttp2. For example, on macOS:
 
 ```sh

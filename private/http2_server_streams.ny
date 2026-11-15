@@ -123,19 +123,30 @@ method(Http2ServerSession) RunStreaming() -> Result<Unit, Http2Error> {
 }
 
 method(Http2StreamCallbackState) Head(session: *mut int8, id: int32, count: int32) -> int32 {
+  let request = Http2StreamRequest.Read(self.api.core, session, id, count);
+  if request.IsErr() {
+    return -1;
+  }
+
+  return self.handler.OnHead(request.get_if<Http2StreamRequest>() as Http2StreamRequest).IsOk() ? 0 : -1;
+}
+
+static method(Http2StreamRequest) Read(
+  api: ref Http2ServerProviderApi, session: *mut int8, id: int32, count: int32
+) -> Result<Http2StreamRequest, Http2Error> {
   var request = Http2StreamRequest{stream_id: id, fields: Array<HttpField>.New()};
   var index: int32 = 0;
   while index < count {
     var native = Http2ServerNativeField{};
-    if self.api.core.field(session, id, index, &mut native) != 0 {
-      return -1;
+    if api.field(session, id, index, &mut native) != 0 {
+      return Http2Error{kind: Http2ErrorKind.Protocol};
     }
 
     request.AddHeader(native.CopyField());
     index += 1;
   }
 
-  return self.handler.OnHead(request).IsOk() ? 0 : -1;
+  return request;
 }
 
 method(Http2StreamRequest) AddHeader(field: ref HttpField) -> void {
@@ -153,30 +164,44 @@ method(Http2StreamRequest) AddHeader(field: ref HttpField) -> void {
 }
 
 method(Http2StreamCallbackState) End(session: *mut int8, id: int32, count: int32) -> int32 {
+  let trailers = Http2WireFields.ReadTrailers(self.api.core, session, id, count);
+  if trailers.IsErr() {
+    return -1;
+  }
+
+  let ended = self.handler.OnEnd(id, trailers.get_if<Array<HttpField>>() as Array<HttpField>);
+  if ended.IsErr() {
+    return -1;
+  }
+
+  return (ended.get_if<Http2StreamResponse>() as Http2StreamResponse).Submit(self.api.respond, session, id);
+}
+
+static method(Http2WireFields) ReadTrailers(
+  api: ref Http2ServerProviderApi, session: *mut int8, id: int32, count: int32
+) -> Result<Array<HttpField>, Http2Error> {
   var trailers = Array<HttpField>.New();
   var index: int32 = 0;
   while index < count {
     var native = Http2ServerNativeField{};
-    if self.api.core.field(session, id, index, &mut native) != 1 {
-      return -1;
+    if api.field(session, id, index, &mut native) != 1 {
+      return Http2Error{kind: Http2ErrorKind.Protocol};
     }
 
     trailers.Push(native.CopyField());
     index += 1;
   }
 
-  let ended = self.handler.OnEnd(id, trailers);
-  if ended.IsErr() {
-    return -1;
-  }
+  return trailers;
+}
 
-  let response = ended.get_if<Http2StreamResponse>() as Http2StreamResponse;
-  let fields = response.fields.Len();
+method(Http2StreamResponse) Submit(respond: Http2StreamRespond, session: *mut int8, id: int32) -> int32 {
+  let fields = self.fields.Len();
   if fields >= 128 {
     return -1;
   }
 
   var headers = Http2WireFields{};
-  headers.Prepare(response.fields);
-  return self.api.respond(session, id, response.status, &headers.fields[0], fields, response.has_body ? 1 : 0);
+  headers.Prepare(self.fields);
+  return respond(session, id, self.status, &headers.fields[0], fields, self.has_body ? 1 : 0);
 }

@@ -32,8 +32,19 @@ typedef struct {
 } h2_stream_callbacks;
 
 typedef struct {
+    int32_t (*head)(void *, void *, int32_t, int32_t);
+    int32_t (*data)(void *, void *, int32_t, const uint8_t *, int32_t);
+    int32_t (*end)(void *, void *, int32_t, int32_t);
+    void (*closed)(void *, int32_t, uint32_t);
+    int32_t (*produce)(void *, int32_t, uint8_t *, int32_t, int32_t *);
+} h2_duplex_callbacks;
+
+typedef struct {
     int32_t id;
     int received_head;
+    int received_end;
+    int responded;
+    int deferred;
     int reset;
     int head_only;
     int expect_continue;
@@ -58,6 +69,7 @@ typedef struct {
     uint32_t goaway_error;
     void *context;
     h2_stream_callbacks callbacks;
+    h2_duplex_callbacks duplex;
     h2_stream slots[MAX_STREAMS];
 } h2_server;
 
@@ -93,7 +105,8 @@ static void destroy_stream(h2_stream *stream) {
 static void notify_close(h2_server *server, h2_stream *stream, uint32_t error) {
     if (!stream->notified) return;
     stream->notified = 0;
-    server->callbacks.closed(server->context, stream->id, error);
+    if (server->duplex.closed) server->duplex.closed(server->context, stream->id, error);
+    else server->callbacks.closed(server->context, stream->id, error);
 }
 
 static int closed_stream(nghttp2_session *session, int32_t id, uint32_t error, void *opaque) {
@@ -172,23 +185,37 @@ static int receive_frame(nghttp2_session *session, const nghttp2_frame *frame, v
     if (!stream || stream->reset) return 0;
     if (frame->hd.type == NGHTTP2_HEADERS && !stream->received_head) {
         stream->received_head = 1;
-        if (server->callbacks.head) {
+        if (server->callbacks.head || server->duplex.head) {
             stream->notified = 1;
-            int admitted = server->callbacks.head(server->context, server, stream->id, stream->field_count);
+            int admitted = server->duplex.head
+                ? server->duplex.head(server->context, server, stream->id, stream->field_count)
+                : server->callbacks.head(server->context, server, stream->id, stream->field_count);
             release_request(stream);
             if (admitted != 0) return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
         }
-        if (stream->expect_continue && !(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
+        if (stream->expect_continue && !stream->responded && !(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
             nghttp2_nv interim = {(uint8_t *)":status", (uint8_t *)"100", 7, 3, NGHTTP2_NV_FLAG_NONE};
             if (nghttp2_submit_headers(session, NGHTTP2_FLAG_NONE, stream->id, NULL, &interim, 1, NULL))
                 return NGHTTP2_ERR_CALLBACK_FAILURE;
         }
     }
     if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-        stream->ready = ++server->sequence;
-        if (server->callbacks.end &&
-            server->callbacks.end(server->context, server, stream->id, stream->field_count) != 0)
-            return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+        stream->received_end = 1;
+        if (server->duplex.end) {
+            int ended = server->duplex.end(server->context, server, stream->id, stream->field_count);
+            release_request(stream);
+            if (ended != 0 || !stream->responded)
+                return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+        } else {
+            stream->ready = ++server->sequence;
+            if (server->callbacks.end &&
+                server->callbacks.end(server->context, server, stream->id, stream->field_count) != 0)
+                return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+        }
+    }
+    if (stream->deferred && (frame->hd.type == NGHTTP2_DATA || stream->received_end)) {
+        if (nghttp2_session_resume_data(session, stream->id)) return NGHTTP2_ERR_CALLBACK_FAILURE;
+        stream->deferred = 0;
     }
     return 0;
 }
@@ -205,14 +232,16 @@ static int receive_data(nghttp2_session *session, uint8_t flags, int32_t id,
     (void)flags;
     h2_server *server = opaque;
     h2_stream *stream = nghttp2_session_get_stream_user_data(session, id);
-    if (server->callbacks.data && length) {
+    if ((server->callbacks.data || server->duplex.data) && length) {
         if (!stream || stream->reset || length > server->body_limit - stream->received_bytes) {
             int consumed = nghttp2_session_consume_connection(session, length);
             if (consumed != 0) return NGHTTP2_ERR_CALLBACK_FAILURE;
             return stream ? reject_stream(session, stream, NGHTTP2_ENHANCE_YOUR_CALM) : 0;
         }
         stream->received_bytes += length;
-        int handled = server->callbacks.data(server->context, id, bytes, (int32_t)length);
+        int handled = server->duplex.data
+            ? server->duplex.data(server->context, server, id, bytes, (int32_t)length)
+            : server->callbacks.data(server->context, id, bytes, (int32_t)length);
         // Return credit after the handler has consumed or rejected the borrowed bytes.
         int consumed = handled == 0 ? nghttp2_session_consume(session, id, length)
                                    : nghttp2_session_consume_connection(session, length);
@@ -249,7 +278,8 @@ static void drop(h2_server *server) {
 }
 
 static h2_server *create_session(int32_t slots, int32_t limit, int32_t secure,
-                                 void *context, const h2_stream_callbacks *streaming) {
+                                 void *context, const h2_stream_callbacks *streaming,
+                                 const h2_duplex_callbacks *duplex) {
     if (slots <= 0 || slots > MAX_STREAMS || limit <= 0 || limit > 16777216) return NULL;
     h2_server *server = calloc(1, sizeof(*server));
     if (!server) return NULL;
@@ -258,6 +288,7 @@ static h2_server *create_session(int32_t slots, int32_t limit, int32_t secure,
     server->secure = secure;
     server->context = context;
     if (streaming) server->callbacks = *streaming;
+    if (duplex) server->duplex = *duplex;
     nghttp2_session_callbacks *callbacks = NULL;
     nghttp2_option *options = NULL;
     int status = -1;
@@ -271,7 +302,7 @@ static h2_server *create_session(int32_t slots, int32_t limit, int32_t secure,
     nghttp2_option_set_max_settings(options, 32);
     nghttp2_option_set_max_outbound_ack(options, 64);
     nghttp2_option_set_max_continuations(options, 16);
-    if (streaming) nghttp2_option_set_no_auto_window_update(options, 1);
+    if (streaming || duplex) nghttp2_option_set_no_auto_window_update(options, 1);
     if (nghttp2_session_server_new2(&server->session, callbacks, server, options)) goto done;
     nghttp2_settings_entry settings[] = {
         {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, (uint32_t)slots},
@@ -287,14 +318,21 @@ done:
 }
 
 static h2_server *create(int32_t slots, int32_t limit, int32_t secure) {
-    return create_session(slots, limit, secure, NULL, NULL);
+    return create_session(slots, limit, secure, NULL, NULL, NULL);
 }
 
 static h2_server *create_streaming(int32_t slots, int32_t limit, int32_t secure,
                                   void *context, const h2_stream_callbacks *callbacks) {
     if (!context || !callbacks || !callbacks->head || !callbacks->data ||
         !callbacks->end || !callbacks->closed || !callbacks->produce) return NULL;
-    return create_session(slots, limit, secure, context, callbacks);
+    return create_session(slots, limit, secure, context, callbacks, NULL);
+}
+
+static h2_server *create_duplex(int32_t slots, int32_t limit, int32_t secure,
+                               void *context, const h2_duplex_callbacks *callbacks) {
+    if (!context || !callbacks || !callbacks->head || !callbacks->data ||
+        !callbacks->end || !callbacks->closed || !callbacks->produce) return NULL;
+    return create_session(slots, limit, secure, context, NULL, callbacks);
 }
 
 static intptr_t output(h2_server *server, const uint8_t **bytes) {
@@ -341,17 +379,29 @@ static nghttp2_ssize response_data(nghttp2_session *session, int32_t id, uint8_t
     (void)session;
     h2_stream *stream = source->ptr;
     h2_server *server = opaque;
-    if (server->callbacks.produce) {
+    if (server->callbacks.produce || server->duplex.produce) {
         size_t remaining = server->body_limit - stream->sent;
         // A one-byte probe lets an exact-budget producer report EOF.
         size_t limit = remaining == 0 ? 1 : remaining;
         size_t admitted = capacity < limit ? capacity : limit;
         if (!admitted) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
-        int32_t count = server->callbacks.produce(server->context, id, output_bytes, (int32_t)admitted);
+        int32_t end = 0;
+        int32_t count;
+        if (server->duplex.produce) {
+            count = server->duplex.produce(server->context, id, output_bytes, (int32_t)admitted, &end);
+            if (count == 0 && !end) {
+                if (stream->received_end) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+                stream->deferred = 1;
+                return NGHTTP2_ERR_DEFERRED;
+            }
+        } else {
+            count = server->callbacks.produce(server->context, id, output_bytes, (int32_t)admitted);
+            end = count == 0;
+        }
         if (count < 0 || (size_t)count > admitted || (size_t)count > remaining)
             return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
         stream->sent += (size_t)count;
-        if (count == 0) *flags |= NGHTTP2_DATA_FLAG_EOF;
+        if (end) *flags |= NGHTTP2_DATA_FLAG_EOF;
         return count;
     }
 
@@ -371,7 +421,8 @@ static int32_t reset(h2_server *server, int32_t id) {
 static int32_t submit_response(h2_server *server, int32_t id, int32_t status, const h2_field *headers,
                                 int32_t count, const uint8_t *data, int32_t size, int has_body) {
     h2_stream *stream = nghttp2_session_get_stream_user_data(server->session, id);
-    if (!stream || !stream->ready) return -1;
+    if (!stream || stream->reset || stream->responded ||
+        (server->duplex.head ? !stream->received_head : !stream->ready)) return -1;
     if (status < 200 || status > 599 || count < 0 || count >= MAX_FIELDS ||
         size < 0 || (size_t)size > server->body_limit ||
         (has_body && (stream->head_only || status == 204 || status == 205 || status == 304))) return -2;
@@ -395,7 +446,7 @@ static int32_t submit_response(h2_server *server, int32_t id, int32_t status, co
         uint8_t flags = equal(h->name, name_size, "set-cookie") ? NGHTTP2_NV_FLAG_NO_INDEX : NGHTTP2_NV_FLAG_NONE;
         wire[i + 1] = (nghttp2_nv){(uint8_t *)h->name, (uint8_t *)value, name_size, value_size, flags};
     }
-    release_request(stream);
+    if (!server->duplex.head) release_request(stream);
     stream->ready = 0;
     if (size) {
         stream->body = malloc((size_t)size);
@@ -404,7 +455,9 @@ static int32_t submit_response(h2_server *server, int32_t id, int32_t status, co
         stream->used = (size_t)size;
     }
     nghttp2_data_provider2 provider = {{.ptr = stream}, response_data};
-    return nghttp2_submit_response2(server->session, id, wire, (size_t)count + 1, has_body ? &provider : NULL);
+    int result = nghttp2_submit_response2(server->session, id, wire, (size_t)count + 1, has_body ? &provider : NULL);
+    if (!result) stream->responded = 1;
+    return result;
 }
 
 static int32_t respond(h2_server *server, int32_t id, int32_t status, const h2_field *headers,
@@ -437,6 +490,23 @@ typedef struct {
     h2_server *(*create)(int32_t, int32_t, int32_t, void *, const h2_stream_callbacks *);
     int32_t (*respond)(h2_server *, int32_t, int32_t, const h2_field *, int32_t, int32_t);
 } h2_stream_api;
+
+typedef struct {
+    h2_server_api core;
+    h2_server *(*create)(int32_t, int32_t, int32_t, void *, const h2_duplex_callbacks *);
+    int32_t (*respond)(h2_server *, int32_t, int32_t, const h2_field *, int32_t, int32_t);
+} h2_duplex_api;
+
+#ifdef _WIN32
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
+int32_t nyra_http2_server_duplex_provider(int32_t version, h2_duplex_api *api) {
+    if (version != 1 || !api) return 0;
+    *api = (h2_duplex_api){core_api, create_duplex, respond_streaming};
+    return 1;
+}
 
 #ifdef _WIN32
 __declspec(dllexport)

@@ -5,6 +5,7 @@
 module Http2ServerDriver;
 part "http2_server_requests.ny";
 part "http2_server_streams.ny";
+part "http2_server_duplex.ny";
 import "stdlib:stdlib.ny";
 import "net_core:net_core.ny";
 import "http:http.ny";

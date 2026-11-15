@@ -62,6 +62,33 @@ pub interface Http2StreamHandler {
   OnClose(stream_id: int32, code: uint32) -> void;
 }
 
+/** @brief Accept an inbound event and optionally start the final response. */
+pub struct Http2DuplexAction {
+  response: Http2StreamResponse?;
+}
+
+/** @brief Exact response bytes written and whether they complete the body. */
+pub struct Http2DuplexChunk {
+  written: int32;
+  end: bool;
+}
+
+/**
+ * @brief Stream request and response bodies independently on one HTTP/2 stream.
+ * Supply one final response by OnEnd. OnHead or OnData can start it while
+ * the request is open. Produce borrows peer-credit-sized output space.
+ * To wait for more inbound data, return zero bytes with end false. A following
+ * DATA frame or OnEnd resumes the producer. After OnEnd, produce bytes or EOF.
+ * OnClose runs once after OnHead, including reset and connection teardown.
+ */
+pub interface Http2DuplexHandler {
+  OnHead(request: ref Http2StreamRequest) -> Result<Http2DuplexAction, Http2Error>;
+  OnData(stream_id: int32, data: ref NetBytes) -> Result<Http2DuplexAction, Http2Error>;
+  OnEnd(stream_id: int32, trailers: ref Array<HttpField>) -> Result<Http2DuplexAction, Http2Error>;
+  Produce(stream_id: int32, output: ref NetMutableBytes) -> Result<Http2DuplexChunk, Http2Error>;
+  OnClose(stream_id: int32, code: uint32) -> void;
+}
+
 /** @brief Drives multiple client streams on one HTTP/2 connection. */
 pub struct Http2Server;
 
@@ -94,5 +121,21 @@ pub static method(Http2Server) ServeStreamingTcp(
  * affected stream. Set the body budget as for ServeTransport. */
 pub static method(Http2Server) ServeStreamingTransport(
   transport: WebSocketTransport, secure: bool, provider_file: ref string, handler: Http2StreamHandler,
+  limits: ref Http2Limits, options: ref NetOperationOptions
+) -> Result<Unit, Http2Error>;
+
+/** @brief Consume accepted TCP and serve full-duplex HTTP/2 prior knowledge. */
+pub static method(Http2Server) ServeDuplexTcp(
+  connection: ref mut TcpConnection, provider_file: ref string, handler: Http2DuplexHandler,
+  limits: ref Http2Limits, options: ref NetOperationOptions
+) -> Result<Unit, Http2Error>;
+
+/**
+ * @brief Serve full-duplex HTTP/2 over a consumed ordered transport.
+ * Set secure for an authenticated transport with ALPN h2. The body budget
+ * applies independently to upload and response bytes per stream.
+ */
+pub static method(Http2Server) ServeDuplexTransport(
+  transport: WebSocketTransport, secure: bool, provider_file: ref string, handler: Http2DuplexHandler,
   limits: ref Http2Limits, options: ref NetOperationOptions
 ) -> Result<Unit, Http2Error>;
