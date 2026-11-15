@@ -171,7 +171,7 @@ static method(HttpServerError) FromTransport(error: ref WebSocketError) -> HttpS
 }
 
 // The installed transport owns transport I/O and can transfer directly to WebSocket.
-struct HttpServerTcp implements WebSocketTransport {
+pub struct HttpServerTcp implements WebSocketTransport {
   connection: TcpConnection;
 }
 

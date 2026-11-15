@@ -52,3 +52,27 @@ their own worker model. TLS can terminate at a reverse proxy.
 After authorizing a request and validating its route and Origin, call
 `Upgrade` to transfer transport ownership and preserve any WebSocket bytes read
 with the HTTP head.
+
+## HTTP/2
+
+Import `http_server:http2_server.ny` and implement `Http2ServerHandler`.
+Pass accepted TCP to `Http2Server.ServeTcp` for cleartext prior knowledge.
+`Http2Server.ServeSecure` from `http_tls:https_server.ny` negotiates ALPN
+`h2`. Both entry points serve one connection. Handlers run serially in
+request completion order while the connection supports multiple active
+streams. Limits apply per stream to the request and response body, with a
+separate header cap. An oversized request or a handler error resets its
+stream. The handler receives the complete body, headers and request trailers.
+The initial profile handles regular HTTP requests and final responses.
+CONNECT and server push are outside this profile.
+
+Build the optional server bridge with nghttp2. For example, on macOS:
+
+```sh
+cc -std=c11 -fvisibility=hidden -dynamiclib $(pkg-config --cflags libnghttp2) \
+  private/native/http2_server.c $(pkg-config --libs libnghttp2) \
+  -o /path/to/libnyra_http2_server.dylib
+```
+
+On ELF systems use `-fPIC -shared`. Pass a trusted absolute library path.
+The HTTP/1.1 entry points do not load this bridge.
