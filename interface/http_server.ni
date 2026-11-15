@@ -31,7 +31,7 @@ pub struct HttpServerLimits {
   response_body: HttpBodyLimits;
 }
 
-/** @brief Owned exact-match routes. Routes compare method and raw path case sensitively. */
+/** @brief Owned routes comparing methods and raw path segments case sensitively. */
 pub struct HttpRoutes;
 
 /** @brief Start an empty route table. */
@@ -40,8 +40,31 @@ pub static method(HttpRoutes) New() -> HttpRoutes;
 /** @brief Register a literal path and method or report an invalid or duplicate route. */
 pub method(HttpRoutes) Add(verb: ref string, path: ref string, id: int32) -> bool;
 
+/** @brief Register a path pattern with one or more whole-segment {name} captures.
+ * @note Names must be unique ASCII identifiers. Each capture matches one nonempty
+ * raw segment. Equivalent patterns for the same method are rejected. Literal
+ * routes take priority, then patterns are tried in registration order. */
+pub method(HttpRoutes) AddPattern(verb: ref string, path: ref string, id: int32) -> bool;
+
+/** @brief An owned named capture from a request's raw path. */
+pub struct HttpRouteParam {
+  name: string;
+  value: string;
+}
+
+/** @brief Matched route ID and owned captures in path order. */
+pub struct HttpRouteMatch {
+  id: int32;
+  params: Array<HttpRouteParam>;
+}
+
 /** @brief Find the route for a parsed request. The query string does not participate. */
 pub method(HttpRoutes) Match(request: ref HttpHead) -> int32?;
+
+/** @brief Find a route and captures for the raw origin-form target of a parsed request.
+ * @note Pass the HTTP/1.1 method/target or HTTP/2 :method/:path. The query is
+ * ignored and percent escapes are preserved, including an encoded slash. */
+pub method(HttpRoutes) MatchTarget(verb: ref string, target: ref string) -> HttpRouteMatch?;
 
 /** @brief Owns an ordered connection and one active HTTP/1.1 exchange on the caller thread. */
 pub struct HttpServerExchange;

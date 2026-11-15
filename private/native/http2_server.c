@@ -1,6 +1,8 @@
 // Copyright (c) 2026 tangxiangjiang
 // SPDX-License-Identifier: MIT
 
+/* Expose the nghttp2_ssize API for compatibility with the MSVC CRT. */
+#define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
 #include <stdint.h>
 #include <stdlib.h>

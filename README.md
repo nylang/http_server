@@ -7,8 +7,13 @@ provider with the net_core native build instructions.
 Create a listener with `TcpListener.Listen`. For each exchange call
 `HttpServerExchange.Accept(listener, limits, options)`, or use `Read` to
 adopt a TCP connection accepted by your application. Inspect `Request()`.
-An optional `HttpRoutes` dispatches by exact method and raw path, ignoring
-the query. Read decoded request payload with `ReadBody` until it returns
+An optional `HttpRoutes` dispatches by method and raw path, ignoring the
+query. Register literal paths with `Add` and named single-segment patterns
+such as `/files/{name}` with `AddPattern`. A literal match wins. Patterns
+are tried in registration order. `MatchTarget` accepts the method and target
+from either HTTP/1.1 or HTTP/2 and returns owned capture names and values.
+Captures preserve percent escapes such as `%2F`.
+Read decoded request payload with `ReadBody` until it returns
 zero. Supply `Content-Length` or `Transfer-Encoding: chunked` to
 `StartResponse` and stream bytes using `WriteBody`. `FinishResponse`
 completes framing and closes the connection.
@@ -74,5 +79,7 @@ cc -std=c11 -fvisibility=hidden -dynamiclib $(pkg-config --cflags libnghttp2) \
   -o /path/to/libnyra_http2_server.dylib
 ```
 
-On ELF systems use `-fPIC -shared`. Pass a trusted absolute library path.
+On ELF systems use `-fPIC -shared`. On Windows, build a DLL and define
+`NGHTTP2_STATICLIB` when linking a static nghttp2 library.
+Pass a trusted absolute library path.
 The HTTP/1.1 entry points do not load this bridge.
