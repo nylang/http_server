@@ -78,7 +78,7 @@ pub static method(HttpServerExchange) ReadPersistent(
  * as well as success and can hand it off to WebSocket. */
 pub static method(HttpServerExchange) ReadTransport(
   transport: WebSocketTransport, limits: ref HttpServerLimits,
-  options: ref NetOperationOptions, persistent: bool
+  options: ref NetOperationOptions, persistent: bool, {require_framed_response: bool = false}
 ) -> Result<HttpServerExchange, HttpServerError>;
 
 /** @brief Read the next request after finishing the previous response.

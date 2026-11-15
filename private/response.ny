@@ -88,6 +88,10 @@ method(HttpServerState) PrepareResponse(
 
   let response_head = parsed.get_if<HttpHead>() as HttpHead;
   let response_plan = response_head.BodyPlan().get_if<HttpBodyPlan>() as HttpBodyPlan;
+  if self.require_framed_response && response_plan.kind == HttpBodyKind.UntilEof {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidArgument};
+  }
+
   var writer = HttpBodyWriter.New(response_head, self.limits.response_body);
   if writer.IsErr() {
     return HttpServerError{kind: HttpServerErrorKind.Protocol, http: writer.get_if<HttpError>()};

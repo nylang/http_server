@@ -21,6 +21,7 @@ struct HttpServerState {
   responding: bool;
   response_finished: bool;
   persistent: bool;
+  require_framed_response: bool;
   close_after_response: bool;
   expect_continue: bool;
   prefix: NetBuffer;
@@ -86,10 +87,12 @@ pub static method(HttpServerExchange) ReadPersistent(
 }
 
 pub static method(HttpServerExchange) ReadTransport(
-  transport: WebSocketTransport, limits: ref HttpServerLimits, options: ref NetOperationOptions, persistent: bool
+  transport: WebSocketTransport, limits: ref HttpServerLimits, options: ref NetOperationOptions,
+  persistent: bool, {require_framed_response: bool = false}
 ) -> Result<HttpServerExchange, HttpServerError> {
   var state = new arc<HttpServerState>{
-    transport: transport, options: options, limits: limits, persistent: persistent
+    transport: transport, options: options, limits: limits, persistent: persistent,
+    require_framed_response: require_framed_response
   };
   let received = state.ReadHead();
   if received.IsErr() || !(received.get_if<bool>() as bool) {
