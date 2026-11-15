@@ -38,6 +38,10 @@ Other handler errors end the loop. The
 caller owns the listener and can use the lower-level exchange API for a
 concurrent worker model.
 
+`HttpServer.ServeTransport` drives a persistent HTTP/1.1 connection on an
+already established transport. Its deadline and cancellation cover the whole
+connection. Use explicit response framing or a bodyless response.
+
 `HttpServer.ServeConcurrent` provides a pool of 1 to 64 connection
 workers. Implement `HttpServerHandlerFactory` to give each worker its own
 handler instance. A worker handles every request on its assigned persistent

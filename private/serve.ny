@@ -143,8 +143,30 @@ static method(HttpServer) ServeConnection(
   }
 
   var exchange = move(opened.get_if<HttpServerExchange>() as HttpServerExchange);
-  while !stop.IsCancelled() {
-    exchange.AllowHandlerToFinish();
+  return HttpServer.ServeExchanges(exchange, handler, options, timeout_ns);
+}
+
+pub static method(HttpServer) ServeTransport(
+  transport: WebSocketTransport, handler: ref mut HttpServerHandler,
+  limits: ref HttpServerLimits, options: ref NetOperationOptions
+) -> Result<Unit, HttpServerError> {
+  var opened = HttpServerExchange.ReadTransport(move(transport), limits, options, true, require_framed_response: true);
+  if opened.IsErr() {
+    return opened.get_if<HttpServerError>() as HttpServerError;
+  }
+
+  var exchange = move(opened.get_if<HttpServerExchange>() as HttpServerExchange);
+  return HttpServer.ServeExchanges(exchange, handler, options, 0u64);
+}
+
+static method(HttpServer) ServeExchanges(
+  exchange: ref mut HttpServerExchange, handler: ref mut HttpServerHandler,
+  options: ref NetOperationOptions, timeout_ns: uint64
+) -> Result<Unit, HttpServerError> {
+  while !options.cancellation.IsCancelled() {
+    if timeout_ns != 0u64 {
+      exchange.AllowHandlerToFinish();
+    }
     let result = handler.Handle(exchange);
     if result.IsErr() {
       let error = result.get_if<HttpServerError>() as HttpServerError;
@@ -154,15 +176,18 @@ static method(HttpServer) ServeConnection(
       }
       return result;
     }
-    if exchange.cell == nil || stop.IsCancelled() {
+    if exchange.cell == nil || options.cancellation.IsCancelled() {
       break;
     }
     if !exchange.ResponseFinished() {
       return HttpServerError{kind: HttpServerErrorKind.InvalidState};
     }
 
-    let now = Instant.Now().ToDurationSinceEpochish().ToNanoseconds();
-    let next_options = NetOperationOptions{deadline: NetDeadline.After(now, timeout_ns), cancellation: stop};
+    var next_options = options;
+    if timeout_ns != 0u64 {
+      let now = Instant.Now().ToDurationSinceEpochish().ToNanoseconds();
+      next_options.deadline = NetDeadline.After(now, timeout_ns);
+    }
     let next = exchange.NextRequest(next_options);
     if next.IsErr() || !(next.get_if<bool>() as bool) {
       break;

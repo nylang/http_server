@@ -190,3 +190,12 @@ pub static method(HttpServer) ServeConcurrent(
   listener: ref mut TcpListener, handler_factory: ref mut HttpServerHandlerFactory, workers: int32,
   limits: ref HttpServerLimits, stop: ref NetCancellation, timeout_ns: uint64
 ) -> Result<Unit, HttpServerError>;
+
+/** @brief Serve HTTP/1.1 requests on one established byte transport.
+ * @note Takes the transport and uses the supplied deadline and cancellation
+ * for the lifetime of the connection. Responses must be explicitly framed
+ * or bodyless. A handler can retire or hand off the connection. */
+pub static method(HttpServer) ServeTransport(
+  transport: WebSocketTransport, handler: ref mut HttpServerHandler,
+  limits: ref HttpServerLimits, options: ref NetOperationOptions
+) -> Result<Unit, HttpServerError>;
