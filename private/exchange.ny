@@ -10,6 +10,7 @@ import "stdlib:stdlib.ny";
 import "http:http.ny";
 import "net_core:net_core.ny";
 import "interface/http_server.ni";
+import "private/worker_queue.ny";
 
 struct HttpServerState {
   transport: WebSocketTransport;

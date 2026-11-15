@@ -55,9 +55,7 @@ method(Http2ServerSession) CopyRequest(
       return Http2Error{kind: Http2ErrorKind.Protocol};
     }
 
-    let name = copy(string.ViewFrom(native.name as *const int8, native.name_size));
-    let value = copy(string.ViewFrom(native.value as *const int8, native.value_size));
-    let field = HttpField{name: name, value: value};
+    let field = native.CopyField();
     if kind == 1 {
       request.trailers.Push(field);
     } else {
@@ -67,6 +65,12 @@ method(Http2ServerSession) CopyRequest(
   }
 
   return request;
+}
+
+method(Http2ServerNativeField) CopyField() -> HttpField {
+  let name = copy(string.ViewFrom(self.name as *const int8, self.name_size));
+  let value = copy(string.ViewFrom(self.value as *const int8, self.value_size));
+  return HttpField{name: name, value: value};
 }
 
 method(Http2ServerRequest) AddHeader(field: ref HttpField) -> void {
@@ -89,20 +93,28 @@ method(Http2ServerSession) SubmitResponse(id: int32, response: ref Http2ServerRe
     return -2;
   }
 
-  var names: <string>[128] = <string>[128]{};
-  var native: <Http2ServerNativeField>[128] = <Http2ServerNativeField>[128]{};
+  var headers = Http2WireFields{};
+  headers.Prepare(response.fields);
+  return self.provider.api.respond(
+    self.provider.handle, id, response.status, &headers.fields[0], count, response.body.Data(), response.body.Len()
+  );
+}
+
+// Keep the normalized names alive until the provider copies the header block.
+struct Http2WireFields {
+  names: <string>[128];
+  fields: <Http2ServerNativeField>[128];
+}
+
+method(Http2WireFields) Prepare(fields: ref Array<HttpField>) -> void {
   var index: int32 = 0;
-  while index < count {
-    let field = response.fields.Get(index);
-    names[index] = field.name.ToLowerAscii();
-    native[index] = Http2ServerNativeField{
-      name: names[index].data as *const uint8, value: field.value.data as *const uint8,
-      name_size: names[index].length, value_size: field.value.length
+  while index < fields.Len() {
+    let field = fields.Get(index);
+    self.names[index] = field.name.ToLowerAscii();
+    self.fields[index] = Http2ServerNativeField{
+      name: self.names[index].data as *const uint8, value: field.value.data as *const uint8,
+      name_size: self.names[index].length, value_size: field.value.length
     };
     index += 1;
   }
-
-  return self.provider.api.respond(
-    self.provider.handle, id, response.status, &native[0], count, response.body.Data(), response.body.Len()
-  );
 }

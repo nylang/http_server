@@ -1,9 +1,10 @@
 // Copyright (c) 2026 tangxiangjiang
 // SPDX-License-Identifier: MIT
 
-/** @brief Drives HTTP/2 connection I/O and serial dispatch of completed requests. */
+/** @brief Drives HTTP/2 connection I/O with buffered or incremental handlers. */
 module Http2ServerDriver;
 part "http2_server_requests.ny";
+part "http2_server_streams.ny";
 import "stdlib:stdlib.ny";
 import "net_core:net_core.ny";
 import "http:http.ny";
@@ -56,44 +57,66 @@ method(Http2ServerSession) Run(handler: ref mut Http2ServerHandler) -> Result<Un
   var scratch: <uint8>[16384] = <uint8>[16384]{};
   let buffer = NetMutableBytes.FromRaw(&mut scratch[0], 16384ip).get_if<NetMutableBytes>() as NetMutableBytes;
   while true {
-    let checked = self.options.Check(Instant.Now().ToDurationSinceEpochish().ToNanoseconds());
+    let checked = self.Check();
     if checked.IsErr() {
-      return Http2Error{kind: Http2ErrorKind.Network, network: checked.get_if<NetError>()};
+      return checked;
     }
     let dispatched = self.Dispatch(handler);
     if dispatched.IsErr() {
       return dispatched;
     }
-    let flushed = self.Flush();
-    if flushed.IsErr() {
-      return flushed;
+    let more = self.Pump(buffer);
+    if more.IsErr() {
+      return more.get_if<Http2Error>() as Http2Error;
     }
-
-    let state = self.provider.api.state(self.provider.handle);
-    if state < 0 {
-      return Http2Error{kind: Http2ErrorKind.Protocol};
-    }
-    if state == 0 {
+    if !(more.get_if<bool>() as bool) {
       return UnitValue();
-    }
-    let read = self.transport.Read(buffer, self.options);
-    if read.IsErr() {
-      return Http2ServerSession.MapTransport(read.get_if<WebSocketError>() as WebSocketError);
-    }
-
-    let size = read.get_if<intptr>() as intptr;
-    if size == 0ip {
-      if self.provider.api.pending(self.provider.handle) != 0 {
-        return Http2Error{kind: Http2ErrorKind.UnexpectedEof};
-      }
-      return UnitValue();
-    }
-    if size < 0ip || size > buffer.Len() || self.provider.api.input(self.provider.handle, &scratch[0], size) != size {
-      return Http2Error{kind: Http2ErrorKind.Protocol};
     }
   }
 
   return Http2Error{kind: Http2ErrorKind.Protocol};
+}
+
+method(Http2ServerSession) Check() -> Result<Unit, Http2Error> {
+  let checked = self.options.Check(Instant.Now().ToDurationSinceEpochish().ToNanoseconds());
+  if checked.IsErr() {
+    return Http2Error{kind: Http2ErrorKind.Network, network: checked.get_if<NetError>()};
+  }
+
+  return UnitValue();
+}
+
+method(Http2ServerSession) Pump(buffer: ref NetMutableBytes) -> Result<bool, Http2Error> {
+  let flushed = self.Flush();
+  if flushed.IsErr() {
+    return flushed.get_if<Http2Error>() as Http2Error;
+  }
+
+  let state = self.provider.api.state(self.provider.handle);
+  if state < 0 {
+    return Http2Error{kind: Http2ErrorKind.Protocol};
+  }
+  if state == 0 {
+    return false;
+  }
+
+  let read = self.transport.Read(buffer, self.options);
+  if read.IsErr() {
+    return Http2ServerSession.MapTransport(read.get_if<WebSocketError>() as WebSocketError);
+  }
+
+  let size = read.get_if<intptr>() as intptr;
+  if size == 0ip {
+    if self.provider.api.pending(self.provider.handle) != 0 {
+      return Http2Error{kind: Http2ErrorKind.UnexpectedEof};
+    }
+    return false;
+  }
+  if size < 0ip || size > buffer.Len() || self.provider.api.input(self.provider.handle, buffer.Data(), size) != size {
+    return Http2Error{kind: Http2ErrorKind.Protocol};
+  }
+
+  return true;
 }
 
 method(Http2ServerSession) Flush() -> Result<Unit, Http2Error> {

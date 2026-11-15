@@ -3,8 +3,18 @@
 
 part of HttpServerConnection;
 
-/** @brief Runs a serial accept and dispatch loop with a graceful stop token. */
+/** @brief Runs HTTP/1.1 service loops with a graceful stop token. */
 pub struct HttpServer {}
+
+constexpr kHttpMaxWorkers: int32 = 64;
+
+struct HttpServerWorker {
+  handler: HttpServerHandler;
+  queue: arc<HttpServerWorkerQueue>;
+  limits: HttpServerLimits;
+  stop: NetCancellation;
+  timeout_ns: uint64;
+}
 
 pub static method(HttpServer) Serve(
   listener: ref mut TcpListener, handler: ref mut HttpServerHandler,
@@ -33,6 +43,91 @@ pub static method(HttpServer) Serve(
   }
 
   return UnitValue();
+}
+
+pub static method(HttpServer) ServeConcurrent(
+  listener: ref mut TcpListener, handler_factory: ref mut HttpServerHandlerFactory, workers: int32,
+  limits: ref HttpServerLimits, stop: ref NetCancellation, timeout_ns: uint64
+) -> Result<Unit, HttpServerError> {
+  if workers < 1 || workers > kHttpMaxWorkers || timeout_ns == 0u64 || !stop.CanWakeWaiters() || !listener.IsOpen() {
+    return HttpServerError{kind: HttpServerErrorKind.InvalidArgument};
+  }
+  if stop.IsCancelled() {
+    return UnitValue();
+  }
+
+  let opened = HttpServerWorkerQueue.New(workers, stop);
+  if opened.IsErr() {
+    return opened.get_if<HttpServerError>() as HttpServerError;
+  }
+
+  let queue = opened.get_if<arc<HttpServerWorkerQueue>>() as arc<HttpServerWorkerQueue>;
+  var threads = Array<Thread>.New();
+  if threads.TryReserve(workers).IsErr() {
+    return HttpServerError{kind: HttpServerErrorKind.WorkerUnavailable};
+  }
+
+  while threads.Len() < workers && !stop.IsCancelled() {
+    var created = handler_factory.Create(threads.Len());
+    if created.IsErr() {
+      queue.Fail(created.get_if<HttpServerError>() as HttpServerError);
+      break;
+    }
+
+    let worker: arc<HttpServerWorker> = new arc<HttpServerWorker>{
+      handler: move(created.get_if<HttpServerHandler>() as HttpServerHandler), queue: queue,
+      limits: limits, stop: stop, timeout_ns: timeout_ns
+    };
+    var started = Thread.Spawn(lambda[copy worker]() -> void {
+      worker.Run();
+    });
+    if started.IsErr() {
+      queue.Fail(HttpServerError{kind: HttpServerErrorKind.WorkerUnavailable});
+      break;
+    }
+    threads.Push(move(started.get_if<Thread>() as Thread));
+  }
+
+  let accept_options = NetOperationOptions{cancellation: stop};
+  while queue.AwaitCapacity() {
+    var accepted = listener.Accept(accept_options);
+    if accepted.IsErr() {
+      let error = accepted.get_if<NetError>() as NetError;
+      if error.kind != NetErrorKind.Cancelled || !stop.IsCancelled() {
+        queue.Fail(HttpServerError{kind: HttpServerErrorKind.Transport, socket: error});
+      }
+      break;
+    }
+
+    queue.Offer(move(accepted.get_if<TcpConnection>() as TcpConnection));
+  }
+
+  queue.Close();
+  var index: int32 = 0;
+  while index < threads.Len() {
+    if threads.GetMut(index).Join().IsErr() {
+      queue.Fail(HttpServerError{kind: HttpServerErrorKind.WorkerUnavailable});
+    }
+    index += 1;
+  }
+
+  return queue.Outcome();
+}
+
+method(HttpServerWorker) Run() -> void {
+  while !self.stop.IsCancelled() {
+    var accepted = self.queue.Take();
+    if accepted == nil {
+      return;
+    }
+
+    var connection = move(accepted as TcpConnection);
+    let served = HttpServer.ServeConnection(connection, self.handler, self.limits, self.stop, self.timeout_ns);
+    if served.IsErr() {
+      self.queue.Fail(served.get_if<HttpServerError>() as HttpServerError);
+    }
+    self.queue.FinishConnection();
+  }
 }
 
 static method(HttpServer) ServeConnection(

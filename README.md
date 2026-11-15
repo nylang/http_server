@@ -38,6 +38,13 @@ Other handler errors end the loop. The
 caller owns the listener and can use the lower-level exchange API for a
 concurrent worker model.
 
+`HttpServer.ServeConcurrent` provides a pool of 1 to 64 connection
+workers. Implement `HttpServerHandlerFactory` to give each worker its own
+handler instance. A worker handles every request on its assigned persistent
+connection. Once every slot is occupied, new connections wait in the socket
+backlog. Cancellation wakes accepts and idle request reads, while handlers
+already admitted may finish under their original exchange deadlines.
+
 Use `ReadTransport` to adopt an exclusively owned byte transport after
 its handshake, such as an application-provided TLS transport negotiated
 for HTTP/1.1. It uses the same transport contract as WebSocket, so an
@@ -70,6 +77,16 @@ separate header cap. An oversized request or a handler error resets its
 stream. The handler receives the complete body, headers and request trailers.
 The initial profile handles regular HTTP requests and final responses.
 CONNECT and server push are outside this profile.
+
+Use `ServeStreamingTcp` or `ServeStreamingTransport` with an
+`Http2StreamHandler` for larger transfers. `OnHead` is followed by
+borrowed `OnData` chunks, then `OnEnd` with any request trailers. Returning
+success from `OnData` releases HTTP/2 receive credit for that chunk.
+`OnEnd` returns the response head. Mark `has_body` to produce DATA
+directly into a frame buffer as the peer's flow-control windows allow.
+Callbacks from different streams can interleave on the same connection
+thread. Keep callbacks short and release per-stream state in `OnClose`.
+The same body budget applies to streaming transfers.
 
 Build the optional server bridge with nghttp2. For example, on macOS:
 

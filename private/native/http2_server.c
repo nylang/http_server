@@ -22,6 +22,15 @@ typedef struct {
     int trailer;
 } h2_header;
 
+/* Callbacks run on the connection owner. The context outlives the session. */
+typedef struct {
+    int32_t (*head)(void *, void *, int32_t, int32_t);
+    int32_t (*data)(void *, int32_t, const uint8_t *, int32_t);
+    int32_t (*end)(void *, void *, int32_t, int32_t);
+    void (*closed)(void *, int32_t, uint32_t);
+    int32_t (*produce)(void *, int32_t, uint8_t *, int32_t);
+} h2_stream_callbacks;
+
 typedef struct {
     int32_t id;
     int received_head;
@@ -36,6 +45,8 @@ typedef struct {
     size_t used;
     size_t capacity;
     size_t sent;
+    size_t received_bytes;
+    int notified;
 } h2_stream;
 
 typedef struct {
@@ -45,6 +56,8 @@ typedef struct {
     int secure;
     uint64_t sequence;
     uint32_t goaway_error;
+    void *context;
+    h2_stream_callbacks callbacks;
     h2_stream slots[MAX_STREAMS];
 } h2_server;
 
@@ -77,11 +90,19 @@ static void destroy_stream(h2_stream *stream) {
     memset(stream, 0, sizeof(*stream));
 }
 
+static void notify_close(h2_server *server, h2_stream *stream, uint32_t error) {
+    if (!stream->notified) return;
+    stream->notified = 0;
+    server->callbacks.closed(server->context, stream->id, error);
+}
+
 static int closed_stream(nghttp2_session *session, int32_t id, uint32_t error, void *opaque) {
-    (void)error;
-    (void)opaque;
+    h2_server *server = opaque;
     h2_stream *stream = nghttp2_session_get_stream_user_data(session, id);
-    if (stream) destroy_stream(stream);
+    if (stream) {
+        notify_close(server, stream, error);
+        destroy_stream(stream);
+    }
     return 0;
 }
 
@@ -151,13 +172,24 @@ static int receive_frame(nghttp2_session *session, const nghttp2_frame *frame, v
     if (!stream || stream->reset) return 0;
     if (frame->hd.type == NGHTTP2_HEADERS && !stream->received_head) {
         stream->received_head = 1;
+        if (server->callbacks.head) {
+            stream->notified = 1;
+            int admitted = server->callbacks.head(server->context, server, stream->id, stream->field_count);
+            release_request(stream);
+            if (admitted != 0) return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+        }
         if (stream->expect_continue && !(frame->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
             nghttp2_nv interim = {(uint8_t *)":status", (uint8_t *)"100", 7, 3, NGHTTP2_NV_FLAG_NONE};
             if (nghttp2_submit_headers(session, NGHTTP2_FLAG_NONE, stream->id, NULL, &interim, 1, NULL))
                 return NGHTTP2_ERR_CALLBACK_FAILURE;
         }
     }
-    if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) stream->ready = ++server->sequence;
+    if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+        stream->ready = ++server->sequence;
+        if (server->callbacks.end &&
+            server->callbacks.end(server->context, server, stream->id, stream->field_count) != 0)
+            return reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+    }
     return 0;
 }
 
@@ -173,6 +205,20 @@ static int receive_data(nghttp2_session *session, uint8_t flags, int32_t id,
     (void)flags;
     h2_server *server = opaque;
     h2_stream *stream = nghttp2_session_get_stream_user_data(session, id);
+    if (server->callbacks.data && length) {
+        if (!stream || stream->reset || length > server->body_limit - stream->received_bytes) {
+            int consumed = nghttp2_session_consume_connection(session, length);
+            if (consumed != 0) return NGHTTP2_ERR_CALLBACK_FAILURE;
+            return stream ? reject_stream(session, stream, NGHTTP2_ENHANCE_YOUR_CALM) : 0;
+        }
+        stream->received_bytes += length;
+        int handled = server->callbacks.data(server->context, id, bytes, (int32_t)length);
+        // Return credit after the handler has consumed or rejected the borrowed bytes.
+        int consumed = handled == 0 ? nghttp2_session_consume(session, id, length)
+                                   : nghttp2_session_consume_connection(session, length);
+        if (consumed != 0) return NGHTTP2_ERR_CALLBACK_FAILURE;
+        return handled == 0 ? 0 : reject_stream(session, stream, NGHTTP2_INTERNAL_ERROR);
+    }
     if (!stream || stream->reset || length == 0) return 0;
     if (length > server->body_limit - stream->used)
         return reject_stream(session, stream, NGHTTP2_ENHANCE_YOUR_CALM);
@@ -195,17 +241,23 @@ static int receive_data(nghttp2_session *session, uint8_t flags, int32_t id,
 static void drop(h2_server *server) {
     if (!server) return;
     if (server->session) nghttp2_session_del(server->session);
-    for (int i = 0; i < server->streams; ++i) destroy_stream(&server->slots[i]);
+    for (int i = 0; i < server->streams; ++i) {
+        notify_close(server, &server->slots[i], NGHTTP2_CANCEL);
+        destroy_stream(&server->slots[i]);
+    }
     free(server);
 }
 
-static h2_server *create(int32_t slots, int32_t limit, int32_t secure) {
+static h2_server *create_session(int32_t slots, int32_t limit, int32_t secure,
+                                 void *context, const h2_stream_callbacks *streaming) {
     if (slots <= 0 || slots > MAX_STREAMS || limit <= 0 || limit > 16777216) return NULL;
     h2_server *server = calloc(1, sizeof(*server));
     if (!server) return NULL;
     server->streams = slots;
     server->body_limit = (size_t)limit;
     server->secure = secure;
+    server->context = context;
+    if (streaming) server->callbacks = *streaming;
     nghttp2_session_callbacks *callbacks = NULL;
     nghttp2_option *options = NULL;
     int status = -1;
@@ -219,6 +271,7 @@ static h2_server *create(int32_t slots, int32_t limit, int32_t secure) {
     nghttp2_option_set_max_settings(options, 32);
     nghttp2_option_set_max_outbound_ack(options, 64);
     nghttp2_option_set_max_continuations(options, 16);
+    if (streaming) nghttp2_option_set_no_auto_window_update(options, 1);
     if (nghttp2_session_server_new2(&server->session, callbacks, server, options)) goto done;
     nghttp2_settings_entry settings[] = {
         {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, (uint32_t)slots},
@@ -231,6 +284,17 @@ done:
     if (status == 0) return server;
     drop(server);
     return NULL;
+}
+
+static h2_server *create(int32_t slots, int32_t limit, int32_t secure) {
+    return create_session(slots, limit, secure, NULL, NULL);
+}
+
+static h2_server *create_streaming(int32_t slots, int32_t limit, int32_t secure,
+                                  void *context, const h2_stream_callbacks *callbacks) {
+    if (!context || !callbacks || !callbacks->head || !callbacks->data ||
+        !callbacks->end || !callbacks->closed || !callbacks->produce) return NULL;
+    return create_session(slots, limit, secure, context, callbacks);
 }
 
 static intptr_t output(h2_server *server, const uint8_t **bytes) {
@@ -274,8 +338,23 @@ static int32_t field(h2_server *server, int32_t id, int32_t index, h2_field *val
 
 static nghttp2_ssize response_data(nghttp2_session *session, int32_t id, uint8_t *output_bytes,
                                   size_t capacity, uint32_t *flags, nghttp2_data_source *source, void *opaque) {
-    (void)session; (void)id; (void)opaque;
+    (void)session;
     h2_stream *stream = source->ptr;
+    h2_server *server = opaque;
+    if (server->callbacks.produce) {
+        size_t remaining = server->body_limit - stream->sent;
+        // A one-byte probe lets an exact-budget producer report EOF.
+        size_t limit = remaining == 0 ? 1 : remaining;
+        size_t admitted = capacity < limit ? capacity : limit;
+        if (!admitted) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        int32_t count = server->callbacks.produce(server->context, id, output_bytes, (int32_t)admitted);
+        if (count < 0 || (size_t)count > admitted || (size_t)count > remaining)
+            return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+        stream->sent += (size_t)count;
+        if (count == 0) *flags |= NGHTTP2_DATA_FLAG_EOF;
+        return count;
+    }
+
     size_t count = stream->used - stream->sent;
     if (count > capacity) count = capacity;
     if (count) memcpy(output_bytes, stream->body + stream->sent, count);
@@ -289,13 +368,13 @@ static int32_t reset(h2_server *server, int32_t id) {
     return stream ? reject_stream(server->session, stream, NGHTTP2_INTERNAL_ERROR) : 0;
 }
 
-static int32_t respond(h2_server *server, int32_t id, int32_t status, const h2_field *headers,
-                       int32_t count, const uint8_t *data, int32_t size) {
+static int32_t submit_response(h2_server *server, int32_t id, int32_t status, const h2_field *headers,
+                                int32_t count, const uint8_t *data, int32_t size, int has_body) {
     h2_stream *stream = nghttp2_session_get_stream_user_data(server->session, id);
     if (!stream || !stream->ready) return -1;
     if (status < 200 || status > 599 || count < 0 || count >= MAX_FIELDS ||
         size < 0 || (size_t)size > server->body_limit ||
-        (size && (stream->head_only || status == 204 || status == 205 || status == 304))) return -2;
+        (has_body && (stream->head_only || status == 204 || status == 205 || status == 304))) return -2;
     uint8_t status_text[] = {(uint8_t)('0' + status / 100), (uint8_t)('0' + status / 10 % 10),
                              (uint8_t)('0' + status % 10)};
     nghttp2_nv wire[MAX_FIELDS] = {{(uint8_t *)":status", status_text, 7, 3, NGHTTP2_NV_FLAG_NONE}};
@@ -325,7 +404,17 @@ static int32_t respond(h2_server *server, int32_t id, int32_t status, const h2_f
         stream->used = (size_t)size;
     }
     nghttp2_data_provider2 provider = {{.ptr = stream}, response_data};
-    return nghttp2_submit_response2(server->session, id, wire, (size_t)count + 1, size ? &provider : NULL);
+    return nghttp2_submit_response2(server->session, id, wire, (size_t)count + 1, has_body ? &provider : NULL);
+}
+
+static int32_t respond(h2_server *server, int32_t id, int32_t status, const h2_field *headers,
+                       int32_t count, const uint8_t *data, int32_t size) {
+    return submit_response(server, id, status, headers, count, data, size, size != 0);
+}
+
+static int32_t respond_streaming(h2_server *server, int32_t id, int32_t status,
+                                 const h2_field *headers, int32_t count, int32_t has_body) {
+    return submit_response(server, id, status, headers, count, NULL, 0, has_body != 0);
 }
 
 typedef struct {
@@ -341,6 +430,27 @@ typedef struct {
     int32_t (*reset)(h2_server *, int32_t);
 } h2_server_api;
 
+static const h2_server_api core_api = {create, drop, output, input, state, pending, next, field, respond, reset};
+
+typedef struct {
+    h2_server_api core;
+    h2_server *(*create)(int32_t, int32_t, int32_t, void *, const h2_stream_callbacks *);
+    int32_t (*respond)(h2_server *, int32_t, int32_t, const h2_field *, int32_t, int32_t);
+} h2_stream_api;
+
+#ifdef _WIN32
+__declspec(dllexport)
+#else
+__attribute__((visibility("default")))
+#endif
+int32_t nyra_http2_server_streaming_provider(int32_t version, h2_stream_api *api) {
+    if (version != 1 || !api) return 0;
+    api->core = core_api;
+    api->create = create_streaming;
+    api->respond = respond_streaming;
+    return 1;
+}
+
 #ifdef _WIN32
 __declspec(dllexport)
 #else
@@ -348,6 +458,6 @@ __attribute__((visibility("default")))
 #endif
 int32_t nyra_http2_server_provider(int32_t version, h2_server_api *api) {
     if (version != 1 || !api) return 0;
-    *api = (h2_server_api){create, drop, output, input, state, pending, next, field, respond, reset};
+    *api = core_api;
     return 1;
 }

@@ -13,7 +13,8 @@ pub enum HttpServerErrorKind {
   UnexpectedEof,
   Transport,
   Protocol,
-  Upgrade
+  Upgrade,
+  WorkerUnavailable
 }
 
 /** @brief One failure from an accepted exchange. */
@@ -159,7 +160,14 @@ pub interface HttpServerHandler {
   Handle(exchange: ref mut HttpServerExchange) -> Result<Unit, HttpServerError>;
 }
 
-/** @brief Serial HTTP/1.1 service loop over the caller's listening socket. */
+/** @brief Creates an independently owned handler for each connection worker.
+ * @note Called synchronously in worker index order during startup. Each
+ * handler is then used exclusively by its worker. Synchronize any shared state. */
+pub interface HttpServerHandlerFactory {
+  Create(worker_index: int32) -> Result<HttpServerHandler, HttpServerError>;
+}
+
+/** @brief HTTP/1.1 service loops over the caller's listening socket. */
 pub struct HttpServer;
 
 /** @brief Accept and serve connections until stop is cancelled.
@@ -169,5 +177,16 @@ pub struct HttpServer;
  * Other handler errors stop the loop. The caller retains the listening socket. */
 pub static method(HttpServer) Serve(
   listener: ref mut TcpListener, handler: ref mut HttpServerHandler,
+  limits: ref HttpServerLimits, stop: ref NetCancellation, timeout_ns: uint64
+) -> Result<Unit, HttpServerError>;
+
+/** @brief Serve HTTP/1.1 with a fixed pool of 1..64 connection workers.
+ * @note The caller retains the listener. Admission pauses when all slots are
+ * occupied. Accepted sockets are handed to a worker and kept there for all
+ * persistent requests. When stop is cancelled, admitted handlers can finish
+ * under their exchange deadlines. The first fatal handler or listener error
+ * cancels stop and is returned after the workers exit. */
+pub static method(HttpServer) ServeConcurrent(
+  listener: ref mut TcpListener, handler_factory: ref mut HttpServerHandlerFactory, workers: int32,
   limits: ref HttpServerLimits, stop: ref NetCancellation, timeout_ns: uint64
 ) -> Result<Unit, HttpServerError>;
